@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+# Arduino
+*.hex
+*.elf
+
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.idea/
+pubspec.lock
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
