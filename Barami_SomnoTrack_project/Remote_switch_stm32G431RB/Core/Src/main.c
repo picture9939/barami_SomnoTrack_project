@@ -309,7 +309,7 @@ static void MX_TIM2_Init(void)
   /* USER CODE END USART2_Init 0 */
 
   /* USER CODE BEGIN USART2_Init 1 */
-  /* ✅ USART2 주변클럭 보장 (MSP가 비어 있어도 동작하도록) */
+  /* USART2 주변클럭 보장 (MSP가 비어 있어도 동작하도록) */
 
   /* USER CODE END USART2_Init 1 */
   /* USER CODE END USART2_Init 2 */
