@@ -1,0 +1,88 @@
+Configuration	barami_project01
+STM32CubeMX 	6.15.0
+Date	08/07/2025
+MCU	STM32G431RBTx
+
+
+
+PERIPHERALS	MODES	FUNCTIONS	PINS
+RCC	Crystal/Ceramic Resonator	RCC_OSC_IN	PF0-OSC_IN
+RCC	Crystal/Ceramic Resonator	RCC_OSC_OUT	PF1-OSC_OUT
+SYS	Serial Wire	SYS_JTCK-SWCLK	PA14
+SYS	Serial Wire	SYS_JTMS-SWDIO	PA13
+SYS	SysTick	SYS_VS_Systick	VP_SYS_VS_Systick
+SYS	Dead Battery Signals disabled	SYS_VS_DBSignals	VP_SYS_VS_DBSignals
+TIM2	Internal Clock	TIM2_VS_ClockSourceINT	VP_TIM2_VS_ClockSourceINT
+TIM2	PWM Generation CH2	TIM2_CH2	PA1
+USART2	Asynchronous	USART2_RX	PA3
+USART2	Asynchronous	USART2_TX	PA2
+
+
+
+Pin Nb	PINs	FUNCTIONs	LABELs
+3	PC14-OSC32_IN*	RCC_OSC32_IN	RCC_OSC32_OUT
+4	PC15-OSC32_OUT*	RCC_OSC32_OUT	RCC_OSC32_OUT
+5	PF0-OSC_IN	RCC_OSC_IN	RCC_OSC_IN
+6	PF1-OSC_OUT	RCC_OSC_OUT	RCC_OSC_OUT
+13	PA1	TIM2_CH2	
+14	PA2	USART2_TX	
+17	PA3	USART2_RX	
+34	PB12	GPIO_Output	
+46	PA12	GPIO_Output	
+49	PA13	SYS_JTMS-SWDIO	T_SWDIO
+50	PA14	SYS_JTCK-SWCLK	T_SWCLK
+56	PB3*	SYS_JTDO-SWO	T_SWO
+PERIPHERALS	MODES	FUNCTIONS	PINS
+RCC	Crystal/Ceramic Resonator	RCC_OSC_IN	PF0-OSC_IN
+RCC	Crystal/Ceramic Resonator	RCC_OSC_OUT	PF1-OSC_OUT
+SYS	Serial Wire	SYS_JTCK-SWCLK	PA14
+SYS	Serial Wire	SYS_JTMS-SWDIO	PA13
+SYS	SysTick	SYS_VS_Systick	VP_SYS_VS_Systick
+SYS	Dead Battery Signals disabled	SYS_VS_DBSignals	VP_SYS_VS_DBSignals
+TIM2	Internal Clock	TIM2_VS_ClockSourceINT	VP_TIM2_VS_ClockSourceINT
+TIM2	PWM Generation CH2	TIM2_CH2	PA1
+USART2	Asynchronous	USART2_RX	PA3
+USART2	Asynchronous	USART2_TX	PA2
+
+
+
+Pin Nb	PINs	FUNCTIONs	LABELs
+3	PC14-OSC32_IN*	RCC_OSC32_IN	RCC_OSC32_OUT
+4	PC15-OSC32_OUT*	RCC_OSC32_OUT	RCC_OSC32_OUT
+5	PF0-OSC_IN	RCC_OSC_IN	RCC_OSC_IN
+6	PF1-OSC_OUT	RCC_OSC_OUT	RCC_OSC_OUT
+13	PA1	TIM2_CH2	
+14	PA2	USART2_TX	
+17	PA3	USART2_RX	
+34	PB12	GPIO_Output	
+46	PA12	GPIO_Output	
+49	PA13	SYS_JTMS-SWDIO	T_SWDIO
+50	PA14	SYS_JTCK-SWCLK	T_SWCLK
+56	PB3*	SYS_JTDO-SWO	T_SWO
+
+
+
+SOFTWARE PROJECT
+
+Project Settings : 
+Project Name : barami_project01
+Project Folder : C:\Users\nextd\STM32CubeIDE\workspace_1.19.0\barami_project01
+Toolchain / IDE : STM32CubeIDE
+Firmware Package Name and Version : STM32Cube FW_G4 V1.6.1
+
+
+Code Generation Settings : 
+STM32Cube MCU packages and embedded software packs : Copy only the necessary library files
+Generate peripheral initialization as a pair of '.c/.h' files per peripheral : No
+Backup previously generated files when re-generating : No
+Delete previously generated files when not re-generated : Yes
+Set all free pins as analog (to optimize the power consumption) : No
+
+
+Toolchains Settings : 
+Compiler Optimizations : 
+
+
+
+
+

@@ -1,22 +1,19 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-env/
+# STM32 build
+Debug/
+Release/
+*.elf *.bin *.hex *.map *.list *.o *.d
+.settings/ *.launch *.log
 
-# Arduino
-*.hex
-*.elf
+# VS Code
+.vscode/*
+!.vscode/c_cpp_properties.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
 
-# Flutter/Dart
-.dart_tool/
-.packages
-build/
-.idea/
-pubspec.lock
-
-# VSCode
-.vscode/
-
-# macOS
-.DS_Store
+# Research data
+Sleep_recognition_hr/data/raw/
+Sleep_recognition_hr/data/processed/
+Sleep_recognition_openCV/data/raw/
+Sleep_recognition_openCV/data/processed/
+models/

@@ -1,0 +1,19 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "STM32G431",
+      "includePath": [
+        "${workspaceFolder}/Remote_switch_stm32G431RB/Core/Inc",
+        "${workspaceFolder}/Remote_switch_stm32G431RB/Drivers/STM32G4xx_HAL_Driver/Inc",
+        "${workspaceFolder}/Remote_switch_stm32G431RB/Drivers/CMSIS/Device/ST/STM32G4xx/Include",
+        "${workspaceFolder}/Remote_switch_stm32G431RB/Drivers/CMSIS/Include"
+      ],
+      "defines": ["USE_HAL_DRIVER","STM32G431xx"],
+      "compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "gnu++17",
+      "intelliSenseMode": "gcc-arm64"
+    }
+  ]
+}
