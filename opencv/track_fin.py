@@ -231,12 +231,17 @@ def main():
     prev_gray, prev_eyelid, prev_gaze_center = None, None, None
     epoch, short = EpochStats(), WindowStats()
 
+    # deep sleep 상태 변수
     in_deep = False
     deep_start_ts = None
-    n3_miss_counter = 0
+
+    # N3 상태에서 눈을 떴을 때 UNK로 강제 변경하기 위한 타이머
+    n3_eyes_open_ts = None
 
     last_short_ts = time.time()
     last_epoch_label = "UNK"
+    eye_status_text = "N/A"
+    program_start_ts = time.time()
 
     while True:
         ret, frame = cap.read()
@@ -284,52 +289,83 @@ def main():
 
         now = time.time()
         if now - last_short_ts >= CFG["SHORT_WIN_SEC"]:
-            epoch.add_short_summary(short.summarize())
+            summary = short.summarize()
+            epoch.add_short_summary(summary)
             short.reset()
             last_short_ts = now
 
+            is_last_second_eyes_open = False
+            if summary.get("valid", False):
+                eye_open_check_thr = CFG["EYE_OPEN_THR"] * 1.2
+                if summary.get("eye_open_mean", 1.0) >= eye_open_check_thr:
+                    is_last_second_eyes_open = True
+                    eye_status_text = "OPEN"
+                else:
+                    eye_status_text = "CLOSED"
+            else:
+                eye_status_text = "N/A"
+
             if epoch.is_full():
                 rem_score, n3_score, info = epoch.compute_scores()
-                if rem_score >= CFG["REM_THRESHOLD"] and rem_score > n3_score: label = "REM_LIKE"
-                elif n3_score >= CFG["N3_THRESHOLD"] and n3_score > rem_score: label = "N3_LIKE"
-                else: label = "UNK"
 
-                if label == "N3_LIKE":
-                    n3_miss_counter = 0
+                if rem_score >= CFG["REM_THRESHOLD"] and rem_score > n3_score:
+                    label = "REM_LIKE"
+                elif n3_score >= CFG["N3_THRESHOLD"] and n3_score > rem_score:
+                    label = "N3_LIKE"
+                else:
+                    label = "UNK"
+
+                if last_epoch_label == 'N3_LIKE' and is_last_second_eyes_open:
+                    if n3_eyes_open_ts is None:
+                        n3_eyes_open_ts = now
+                    elif now - n3_eyes_open_ts >= CFG["N3_EYES_OPEN_TO_UNK_SEC"]:
+                        label = "UNK"
+                        print("INFO: N3 중 10초 이상 눈을 떠서 UNK 상태로 전환합니다.")
+                else:
+                    n3_eyes_open_ts = None
+
+                is_last_second_eyes_closed = not is_last_second_eyes_open
+                if label == "N3_LIKE" and is_last_second_eyes_closed:
                     if not in_deep:
-                        if deep_start_ts is None: deep_start_ts = now
+                        if deep_start_ts is None:
+                            deep_start_ts = now
                         elif now - deep_start_ts >= CFG["DEEP_MIN_SECONDS"]:
                             in_deep = True
+                            deep_start_ts = None
                 else:
-                    n3_miss_counter += 1
-                    if n3_miss_counter > CFG["N3_MISS_TOLERANCE"]:
-                        deep_start_ts = None
-                        in_deep = False
+                    deep_start_ts = None
+                    in_deep = False
 
                 last_epoch_label = label
-                print(f"[30s] REM={rem_score:.1f}  N3={n3_score:.1f}  → {label} (Deep: {in_deep})")
                 epoch.reset_counters()
 
+            # CHANGED: 1초마다 터미널에 현재 상태 출력
+            elapsed_seconds = int(time.time() - program_start_ts)
+            print(f"Time: {elapsed_seconds}s | State: {last_epoch_label} | Deep: {in_deep} | Eye: {eye_status_text}")
+            # --- END OF CHANGED SECTION ---
+
+
         # 화면 오버레이
+        elapsed_seconds = int(time.time() - program_start_ts)
+
         cv.rectangle(frame, (face_box[0], face_box[1]), (face_box[2], face_box[3]), (0,255,0), 2)
         cv.rectangle(frame, (body_box[0], body_box[1]), (body_box[2], body_box[3]), (255,0,0), 2)
         y0 = 24
         def put(txt): nonlocal y0; cv.putText(frame, txt, (10, y0), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv.LINE_AA); y0 += 22
-        put(f"Label: {last_epoch_label}   Deep: {in_deep}")
-        put(f"EyeOpen: {eye_open_val:.3f}   MouthOpen: {mouth_open_val:.3f}")
+        
+        put(f"Time: {elapsed_seconds}s   Label: {last_epoch_label}   Deep: {in_deep}")
+        put(f"EyeOpen: {eye_open_val:.3f}   Status: {eye_status_text}")
         put(f"Roll/Yaw/Pitch: {roll:.1f}/{yaw:.3f}/{pitch:.3f}")
         put(f"FaceDiff: {face_diff:.1f}  BodyDiff: {body_diff:.1f}")
 
-        # NEW: 얼굴 외곽선, 눈, 입 등 랜드마크 그리기
         if out.multi_face_landmarks:
             mp_drawing.draw_landmarks(
                 image=frame,
                 landmark_list=out.multi_face_landmarks[0],
-                connections=mp_face_mesh.FACEMESH_CONTOURS, # FACEMESH_CONTOURS: 외곽선만 그림
+                connections=mp_face_mesh.FACEMESH_CONTOURS,
                 landmark_drawing_spec=None,
                 connection_drawing_spec=mp_styles.get_default_face_mesh_contours_style()
             )
-        # --- END OF NEW SECTION ---
 
         cv.imshow("SomnoTrack REM/N3 Analyzer", frame)
         if cv.waitKey(1) == 27: break
