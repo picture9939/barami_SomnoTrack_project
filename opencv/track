@@ -1,0 +1,610 @@
+import cv2 as cv
+import numpy as np
+import time
+from collections import deque
+import math
+
+# =========================
+# Config (임계값/가중치 모음)
+# =========================
+CFG = {
+    # 프레임/윈도 설정
+    "FPS_TARGET": 30,                 # 목표 FPS (실제 FPS는 카메라에 따름)
+    "SHORT_WIN_SEC": 1,               # 1초 창 (지표의 단기 통계)
+    "EPOCH_SEC": 30,                  # 30초 에포크 (수면 단계 판정 단위)
+
+    # 눈 열림(EAR 유사 지표) 임계
+    "EYE_OPEN_THR": 0.24,             # 이 값보다 작으면 "감김"으로 본다 (카메라/개인별 보정 필요)
+    "EYE_STABLE_FRAC_THR": 0.6,       # 30초 중 눈감은 비율이 이 이상이면 N3 가산
+
+    # 사카드/지터(홍채) 임계
+    "SACCADE_SPEED_THR": 0.015,       # 프레임 간 홍채 중심 속도 임계 (정규화 좌표 기준; 카메라/거리 따라 조정)
+    "SACCADE_BURST_COUNT_THR": 20,    # 30초 동안 버스트 개수 임계 (이상이면 REM 가산)
+    "GAZE_JITTER_STD_THR": 0.003,     # 1초 창 홍채 중심 표준편차 임계 (REM에서 커짐)
+    "GAZE_JITTER_EPOCH_RATIO_THR": 0.5,  # 30초 중 '지터 높은 초' 비율 임계
+
+    # 눈꺼풀 거리 출렁임(고주파 변화) 임계
+    "EYE_BAND_ACTIVITY_THR": 0.010,   # 1초 창에서 eyelid distance 변화량 평균 임계
+    "EYE_BAND_EPOCH_RATIO_THR": 0.4,  # 30초 중 '출렁임 높은 초' 비율 임계
+
+    # Still / Burst (프레임 차) 임계
+    "FRAME_DIFF_THR_FACE": 12,        # 얼굴 ROI 프레임차 화소 임계(0~255)
+    "FRAME_DIFF_THR_BODY": 8,         # 상체 ROI 임계
+    "STILL_FRAC_THR": 0.7,            # 30초 중 '정적 프레임' 비율이 이 이상이면 N3 가산
+    "BURST_COUNT_THR": 25,            # 30초 Burst(짧은 튐) 개수 임계 (REM 가산)
+
+    # 얼굴 vs 상체 움직임 비율
+    "FACE_BODY_RATIO_THR": 1.6,       # 얼굴 움직임 / 상체 움직임 비율이 크면 REM 가산
+
+    # 머리자세 정적성 (roll만 간단 proxy / yaw/pitch 근사)
+    "HEAD_STD_THR": 1.2,              # 30초에서 roll/pitch/yaw(근사)의 표준편차 합이 이보다 작으면 N3 가산
+    "HEAD_VS_EYE_REM_RULE": True,     # 머리 고요 + 눈/홍채 고주파면 REM 가산 규칙 활성화
+
+    # 호흡 규칙성 (상체 ROI 밝기 신호로 근사)
+    "BREATH_RHYTHM_STD_THR": 8.0,     # 30초 신호의 이동표준편차 평균이 낮으면(=균일) N3 가산
+
+    # 입벌림(턱 하강) 지표
+    "MOUTH_OPEN_THR": 0.055,          # 1초 창 평균 입벌림이 이 이상이면 N3 가산 후보
+    "MOUTH_OPEN_EPOCH_RATIO_THR": 0.6,
+
+    # 최종 판정 가중치
+    "WEIGHTS": {
+        "REM": {
+            "eye_closed_and_micro": 2.0,     # 눈 감김 + 미세고주파 움직임
+            "saccade_bursts": 2.5,
+            "gaze_jitter": 1.5,
+            "eyelid_band": 1.0,
+            "still_but_micro": 1.5,
+            "face_body_ratio": 1.0,
+            "head_still_eye_active": 1.0
+        },
+        "N3": {
+            "eye_closed_stable": 2.0,
+            "still_high": 2.0,
+            "no_micro_move": 1.5,
+            "breath_regular": 1.0,
+            "mouth_open": 1.0,
+            "head_very_still": 1.0
+        }
+    },
+    "REM_THRESHOLD": 5.0,      # 이 이상이면 REM_LIKE
+    "N3_THRESHOLD": 5.0,       # 이 이상이면 N3_LIKE
+    "DEEP_MIN_SECONDS": 120    # N3 유지 2분 이상 시 deep_start 인정
+}
+
+# =========================
+# MediaPipe FaceMesh 준비
+# =========================
+import mediapipe as mp
+mp_face_mesh = mp.solutions.face_mesh
+
+# Face Mesh에서 자주 쓰는 랜드마크 인덱스(공식 토폴로지 기준)
+# ※ 카메라/얼굴 크기 정규화를 위해 모두 "정규화 좌표(0~1)"로 계산
+LMK = {
+    # 왼/오른쪽 눈 코너 + 상/하 눈꺼풀 대표점
+    # (FaceMesh Topology 참고; 프로젝트에 맞게 조정 가능)
+    "LEFT_EYE":  {"OUTER": 33, "INNER": 133, "UP": 159, "DOWN": 145},
+    "RIGHT_EYE": {"OUTER": 263, "INNER": 362, "UP": 386, "DOWN": 374},
+    # 입 위/아래
+    "MOUTH": {"UP": 13, "DOWN": 14},
+    # 코 중앙(근사 yaw/pitch 계산용)
+    "NOSE": 1,
+    # 홍채(iris) – refine_landmarks=True일 때 활성화 (왼 468-472, 오른 473-477)
+    "L_IRIS": [468, 469, 470, 471, 472],
+    "R_IRIS": [473, 474, 475, 476, 477]
+}
+
+# ===============
+# 보조 유틸 함수
+# ===============
+def l2(a, b):
+    return math.hypot(a[0]-b[0], a[1]-b[1])
+
+def safe_std(arr):
+    if len(arr) < 2:
+        return 0.0
+    return float(np.std(arr))
+
+def angle_deg(p1, p2):
+    # p1->p2 벡터의 기울기 각(도)
+    return math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
+
+def normalize_scalar(x, eps=1e-6):
+    # 과한 스케일 변동을 줄이기 위한 간단한 클리핑
+    return float(max(min(x, 1e3), -1e3))
+
+# =========================
+# 얼굴/ROI/지표 계산 함수
+# =========================
+def eye_open_ratio(landmarks):
+    """
+    눈 열림 지표(간이 EAR): (윗-아랫눈꺼풀 거리) / (안/바깥눈꼬리 거리)
+    왼/오른쪽 평균
+    """
+    L = LMK["LEFT_EYE"]; R = LMK["RIGHT_EYE"]
+    # 왼쪽
+    vL = l2(landmarks[L["UP"]], landmarks[L["DOWN"]])
+    hL = l2(landmarks[L["OUTER"]], landmarks[L["INNER"]])
+    earL = vL / (hL + 1e-6)
+    # 오른쪽
+    vR = l2(landmarks[R["UP"]], landmarks[R["DOWN"]])
+    hR = l2(landmarks[R["OUTER"]], landmarks[R["INNER"]])
+    earR = vR / (hR + 1e-6)
+    return (earL + earR) / 2.0
+
+def iris_centers(landmarks):
+    """
+    refine_landmarks=True일 때 홍채 5점씩 → 평균으로 중심 근사
+    """
+    Li = np.array([landmarks[i] for i in LMK["L_IRIS"]])
+    Ri = np.array([landmarks[i] for i in LMK["R_IRIS"]])
+    cL = Li.mean(axis=0)
+    cR = Ri.mean(axis=0)
+    # 양쪽 평균을 "시선 중심"으로 사용
+    center = ((cL[0]+cR[0])/2.0, (cL[1]+cR[1])/2.0)
+    return (cL[0], cL[1]), (cR[0], cR[1]), center
+
+def eyelid_distance(landmarks):
+    """ 윗/아랫눈꺼풀 거리(평균) """
+    L = LMK["LEFT_EYE"]; R = LMK["RIGHT_EYE"]
+    dL = l2(landmarks[L["UP"]], landmarks[L["DOWN"]])
+    dR = l2(landmarks[R["UP"]], landmarks[R["DOWN"]])
+    return (dL + dR) / 2.0
+
+def mouth_open_amount(landmarks):
+    """ 입 벌림 정도: 위/아래 입술 거리 / 얼굴 폭 정규화 """
+    M = LMK["MOUTH"]
+    L = LMK["LEFT_EYE"]; R = LMK["RIGHT_EYE"]
+    # 얼굴 폭 근사: 양 눈 바깥 코너 간 거리
+    face_w = l2(landmarks[L["OUTER"]], landmarks[R["OUTER"]]) + 1e-6
+    d = l2(landmarks[M["UP"]], landmarks[M["DOWN"]]) / face_w
+    return d
+
+def head_pose_proxies(landmarks):
+    """
+    간단한 머리자세 근사:
+      - roll: 양 눈 바깥 코너 각도
+      - yaw: 코 중앙과 양 눈 바깥 코너의 x 비대칭
+      - pitch: 코 중앙과 양 눈 바깥 코너의 y 상대 위치
+    (solvePnP 대신 간이 proxy. 추세/표준편차만 볼 용도)
+    """
+    L = LMK["LEFT_EYE"]; R = LMK["RIGHT_EYE"]
+    nose = landmarks[LMK["NOSE"]]
+    left_outer  = landmarks[L["OUTER"]]
+    right_outer = landmarks[R["OUTER"]]
+
+    # roll
+    roll = angle_deg(left_outer, right_outer)   # 좌→우 기울기 각도
+
+    # yaw (코가 좌우 어느 쪽에 가까운지; 정규화)
+    w = l2(left_outer, right_outer) + 1e-6
+    yaw = (nose[0] - (left_outer[0]+right_outer[0])/2.0) / w
+
+    # pitch (코의 높이: 눈 라인 대비 상대 y)
+    eye_y = (left_outer[1] + right_outer[1]) / 2.0
+    pitch = (nose[1] - eye_y) / (w)  # 얼굴폭으로 정규화
+
+    return normalize_scalar(roll), normalize_scalar(yaw), normalize_scalar(pitch)
+
+def roi_boxes_from_face(frame_shape, face_bbox_norm):
+    """
+    얼굴 바운딩박스(정규화 0~1)에서 픽셀 좌표 박스 계산
+    상체 ROI는 얼굴 아래쪽으로 직사각형 확장 (간단 근사)
+    """
+    H, W = frame_shape[:2]
+    x, y, w, h = face_bbox_norm  # 0~1
+    x1 = int(max(0, (x)*W)); y1 = int(max(0, (y)*H))
+    x2 = int(min(W, (x+w)*W)); y2 = int(min(H, (y+h)*H))
+    face_box = (x1, y1, x2, y2)
+
+    # 상체 박스: 얼굴 박스 아래로 높이 1.2*h 만큼 확장, 폭은 얼굴폭의 1.4배로 중앙 정렬
+    body_h = int(h*H*1.2)
+    body_w = int(w*W*1.4)
+    cx = (x1 + x2)//2
+    bx1 = max(0, cx - body_w//2)
+    bx2 = min(W, cx + body_w//2)
+    by1 = min(H-1, y2 + int(0.1*h*H))
+    by2 = min(H, by1 + body_h)
+    body_box = (bx1, by1, bx2, by2)
+    return face_box, body_box
+
+def frame_diff_magnitude(prev_gray, gray, box):
+    """ ROI 프레임 차의 평균 절대값 """
+    x1,y1,x2,y2 = box
+    roi_prev = prev_gray[y1:y2, x1:x2]
+    roi_now  = gray[y1:y2, x1:x2]
+    if roi_prev.size == 0 or roi_now.size == 0:
+        return 0.0
+    diff = cv.absdiff(roi_prev, roi_now)
+    return float(np.mean(diff))
+
+# =========================
+# 윈도/에포크 누적 버퍼
+# =========================
+class WindowStats:
+    """ 1초 창 내에서 샘플 누적 → 초 단위 요약을 반환 """
+    def __init__(self):
+        self.reset()
+    def reset(self):
+        self.eye_open = []
+        self.iris_center = []
+        self.eyelid_dist = []
+        self.mouth_open = []
+        self.roll = []; self.yaw = []; self.pitch = []
+        self.eye_band_activity = []  # eyelid dist 연속 변화량
+        self.valid_frames = 0
+        self.face_diff = []
+        self.body_diff = []
+
+    def add(self, sample):
+        # sample dict: keys: eye_open, iris_center, eyelid_dist, mouth_open,
+        #              roll, yaw, pitch, eye_band_delta, face_diff, body_diff, valid
+        if not sample["valid"]:
+            return
+        self.valid_frames += 1
+        self.eye_open.append(sample["eye_open"])
+        self.iris_center.append(sample["iris_center"])
+        self.eyelid_dist.append(sample["eyelid_dist"])
+        self.mouth_open.append(sample["mouth_open"])
+        self.roll.append(sample["roll"]); self.yaw.append(sample["yaw"]); self.pitch.append(sample["pitch"])
+        self.eye_band_activity.append(abs(sample["eye_band_delta"]))
+        self.face_diff.append(sample["face_diff"])
+        self.body_diff.append(sample["body_diff"])
+
+    def summarize(self):
+        """ 1초 요약치 """
+        if self.valid_frames == 0:
+            return {"valid": False}
+        ic = np.array(self.iris_center)
+        # 홍채 중심 지터(표준편차)
+        gaze_jitter = float(np.mean([safe_std(ic[:,0]), safe_std(ic[:,1])]))
+
+        # 눈꺼풀 출렁임
+        eye_band = float(np.mean(self.eye_band_activity)) if self.eye_band_activity else 0.0
+
+        return {
+            "valid": True,
+            "eye_open_mean": float(np.mean(self.eye_open)),
+            "eye_closed_frac": float(np.mean([1.0 if v < CFG["EYE_OPEN_THR"] else 0.0 for v in self.eye_open])),
+            "gaze_jitter_std": gaze_jitter,
+            "eyelid_band_mean": eye_band,
+            "mouth_open_mean": float(np.mean(self.mouth_open)),
+            "roll_std": safe_std(self.roll),
+            "yaw_std": safe_std(self.yaw),
+            "pitch_std": safe_std(self.pitch),
+            "face_diff_mean": float(np.mean(self.face_diff)) if self.face_diff else 0.0,
+            "body_diff_mean": float(np.mean(self.body_diff)) if self.body_diff else 0.0,
+        }
+
+class EpochStats:
+    """ 30초 에포크 누적 → REM/N3 점수 계산 """
+    def __init__(self):
+        self.short_summaries = deque()  # 1초 요약 리스트(최대 30개)
+        self.saccade_bursts = 0
+        self.burst_count = 0
+        self.still_frames = 0
+        self.total_frames = 0
+
+    def add_short_summary(self, s):
+        if s["valid"]:
+            self.short_summaries.append(s)
+            if len(self.short_summaries) > CFG["EPOCH_SEC"]:
+                self.short_summaries.popleft()
+
+    def add_frame_flags(self, face_diff, body_diff):
+        # 정적 프레임 판정 (둘 다 낮으면 정적으로 처리)
+        if face_diff < CFG["FRAME_DIFF_THR_FACE"] and body_diff < CFG["FRAME_DIFF_THR_BODY"]:
+            self.still_frames += 1
+        # 버스트 판정 (얼굴/상체 중 어느 하나라도 순간적으로 큰 변화)
+        if face_diff >= CFG["FRAME_DIFF_THR_FACE"]*2 or body_diff >= CFG["FRAME_DIFF_THR_BODY"]*2:
+            self.burst_count += 1
+        self.total_frames += 1
+
+    def add_saccade_burst(self):
+        self.saccade_bursts += 1
+
+    def is_full(self):
+        return len(self.short_summaries) >= CFG["EPOCH_SEC"]
+
+    def compute_scores(self):
+        # 없으면 중립
+        if not self.is_full() or self.total_frames == 0:
+            return 0.0, 0.0, {}
+
+        shorts = list(self.short_summaries)
+
+        # 집계
+        eye_closed_frac_epoch = np.mean([s["eye_closed_frac"] for s in shorts])
+        jitter_high_ratio = np.mean([1.0 if s["gaze_jitter_std"] > CFG["GAZE_JITTER_STD_THR"] else 0.0 for s in shorts])
+        eyelid_band_high_ratio = np.mean([1.0 if s["eyelid_band_mean"] > CFG["EYE_BAND_ACTIVITY_THR"] else 0.0 for s in shorts])
+        mouth_open_ratio = np.mean([1.0 if s["mouth_open_mean"] > CFG["MOUTH_OPEN_THR"] else 0.0 for s in shorts])
+
+        # 얼굴/상체 움직임 비율 (초 단위 평균)
+        mean_face = np.mean([s["face_diff_mean"] for s in shorts])
+        mean_body = np.mean([s["body_diff_mean"] for s in shorts]) + 1e-6
+        face_body_ratio = mean_face / mean_body
+
+        # 머리자세 정적성
+        head_std_sum = np.mean([s["roll_std"] + s["yaw_std"] + s["pitch_std"] for s in shorts])
+
+        # StillRate
+        still_rate = self.still_frames / float(self.total_frames)
+
+        # 호흡 규칙성(상체 밝기 신호 프록시) → body_diff_mean의 이동표준편차를 간이로 사용
+        # 여기서는 30초 short의 body_diff_mean 표준편차가 낮을수록 규칙적이라고 가정
+        breath_std = np.std([s["body_diff_mean"] for s in shorts])
+
+        # REM/N3 점수 계산
+        wR = CFG["WEIGHTS"]["REM"]; wN = CFG["WEIGHTS"]["N3"]
+        rem_score = 0.0
+        n3_score = 0.0
+        details = {}
+
+        # N3 후보: 눈감은 비율이 높고, 전체 정적
+        if eye_closed_frac_epoch >= CFG["EYE_STABLE_FRAC_THR"]:
+            n3_score += wN["eye_closed_stable"]; details["eye_closed_stable"] = True
+        if still_rate >= CFG["STILL_FRAC_THR"]:
+            n3_score += wN["still_high"]; details["still_high"] = True
+
+        # REM 후보: 눈은 감겼지만(또는 거의 감김) 미세고주파/사카드 존재 + 전체는 비교적 고요
+        if eye_closed_frac_epoch >= 0.4 and jitter_high_ratio > CFG["GAZE_JITTER_EPOCH_RATIO_THR"] and eyelid_band_high_ratio > 0.2:
+            rem_score += wR["eye_closed_and_micro"]; details["eye_closed_and_micro"] = True
+
+        # 사카드 버스트
+        if self.saccade_bursts >= CFG["SACCADE_BURST_COUNT_THR"]:
+            rem_score += wR["saccade_bursts"]; details["saccade_bursts"] = True
+
+        # 지터/눈꺼풀 대역
+        if jitter_high_ratio > CFG["GAZE_JITTER_EPOCH_RATIO_THR"]:
+            rem_score += wR["gaze_jitter"]; details["gaze_jitter"] = True
+        if eyelid_band_high_ratio > CFG["EYE_BAND_EPOCH_RATIO_THR"]:
+            rem_score += wR["eyelid_band"]; details["eyelid_band"] = True
+
+        # Still but micro (전체 고요인데 미세 튐)
+        if still_rate >= 0.5 and (jitter_high_ratio > 0.4 or self.saccade_bursts > 10):
+            rem_score += wR["still_but_micro"]; details["still_but_micro"] = True
+
+        # 얼굴/상체 비율
+        if face_body_ratio >= CFG["FACE_BODY_RATIO_THR"]:
+            rem_score += wR["face_body_ratio"]; details["face_body_ratio"] = True
+
+        # 머리 매우 고요 → N3, 다만 눈/홍채 고주파면 REM 가산 규칙(옵션)
+        if head_std_sum <= CFG["HEAD_STD_THR"]:
+            n3_score += wN["head_very_still"]; details["head_very_still"] = True
+            if CFG["HEAD_VS_EYE_REM_RULE"] and (jitter_high_ratio > 0.4 or self.saccade_bursts > 10):
+                rem_score += wR["head_still_eye_active"]; details["head_still_eye_active"] = True
+
+        # 호흡 규칙성 (낮을수록 규칙)
+        if breath_std <= CFG["BREATH_RHYTHM_STD_THR"]:
+            n3_score += wN["breath_regular"]; details["breath_regular"] = True
+
+        # 입벌림 (턱 하강) 오래 유지 → N3 가산
+        if mouth_open_ratio >= CFG["MOUTH_OPEN_EPOCH_RATIO_THR"]:
+            n3_score += wN["mouth_open"]; details["mouth_open"] = True
+
+        return rem_score, n3_score, {
+            "eye_closed_frac_epoch": eye_closed_frac_epoch,
+            "jitter_high_ratio": jitter_high_ratio,
+            "eyelid_band_high_ratio": eyelid_band_high_ratio,
+            "face_body_ratio": face_body_ratio,
+            "head_std_sum": head_std_sum,
+            "still_rate": still_rate,
+            "breath_std": breath_std,
+            "mouth_open_ratio": mouth_open_ratio,
+            "saccade_bursts": self.saccade_bursts,
+            "burst_count": self.burst_count,
+            "rem_details": details
+        }
+
+# =========================
+# 메인 루프
+# =========================
+def main():
+    cap = cv.VideoCapture(0)
+    if not cap.isOpened():
+        print("❌ 카메라를 열 수 없습니다.")
+        return
+
+    # MediaPipe FaceMesh
+    face_mesh = mp_face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,      # 홍채 랜드마크 활성화
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    mp_drawing = mp.solutions.drawing_utils
+    mp_styles = mp.solutions.drawing_styles
+
+    prev_gray = None
+    prev_eyelid = None
+    prev_gaze_center = None
+    epoch = EpochStats()
+    short = WindowStats()
+
+    # deep sleep 경과 시간 트래킹
+    in_deep = False
+    deep_start_ts = None
+
+    last_short_ts = time.time()
+    last_epoch_label = "UNK"
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # 거울처럼 보기 좋게 좌우 뒤집기 (원하면 끄기)
+        frame = cv.flip(frame, 1)
+        H, W = frame.shape[:2]
+        rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+
+        # FaceMesh 추론
+        out = face_mesh.process(rgb)
+
+        # 그레이 준비(프레임 차 계산용)
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        face_diff = 0.0
+        body_diff = 0.0
+
+        valid = False
+        eye_open_val = 0.0
+        eyelid_dist_val = 0.0
+        mouth_open_val = 0.0
+        roll = yaw = pitch = 0.0
+        eye_band_delta = 0.0
+        iris_center = (0.0, 0.0)
+
+        face_box_norm = (0.35, 0.2, 0.3, 0.45)  # 얼굴을 못잡았을 때의 안전 박스(중앙 근사)
+        if out.multi_face_landmarks:
+            lms = out.multi_face_landmarks[0].landmark
+            # 정규화 좌표 → 튜플 리스트
+            pts = [(l.x, l.y) for l in lms]
+
+            # 얼굴 bbox (정규화) 계산
+            xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+            minx, maxx = max(min(xs), 0.0), min(max(xs), 1.0)
+            miny, maxy = max(min(ys), 0.0), min(max(ys), 1.0)
+            face_box_norm = (minx, miny, maxx - minx, maxy - miny)
+
+            # 지표 계산
+            eye_open_val = eye_open_ratio(pts)
+            eyelid_dist_val = eyelid_distance(pts)
+            mouth_open_val = mouth_open_amount(pts)
+            roll, yaw, pitch = head_pose_proxies(pts)
+
+            # 홍채 중심
+            try:
+                _, _, gaze_center = iris_centers(pts)
+                iris_center = (float(gaze_center[0]), float(gaze_center[1]))
+                # 사카드 버스트: 프레임 간 중심 속도
+                if prev_gaze_center is not None:
+                    speed = l2(iris_center, prev_gaze_center)
+                    if speed > CFG["SACCADE_SPEED_THR"]:
+                        epoch.add_saccade_burst()
+                prev_gaze_center = iris_center
+            except Exception:
+                pass
+
+            # 눈꺼풀 대역 변화량
+            if prev_eyelid is not None:
+                eye_band_delta = eyelid_dist_val - prev_eyelid
+            prev_eyelid = eyelid_dist_val
+
+            valid = True
+
+        # ROI 설정(얼굴/상체)
+        face_box, body_box = roi_boxes_from_face(frame.shape, face_box_norm)
+
+        # 프레임 차 기반 움직임
+        if prev_gray is not None:
+            face_diff = frame_diff_magnitude(prev_gray, gray, face_box)
+            body_diff = frame_diff_magnitude(prev_gray, gray, body_box)
+            epoch.add_frame_flags(face_diff, body_diff)
+        prev_gray = gray
+
+        # 1프레임 샘플 추가
+        short.add({
+            "valid": valid,
+            "eye_open": eye_open_val,
+            "iris_center": iris_center,
+            "eyelid_dist": eyelid_dist_val,
+            "eye_band_delta": eye_band_delta,
+            "mouth_open": mouth_open_val,
+            "roll": roll, "yaw": yaw, "pitch": pitch,
+            "face_diff": face_diff, "body_diff": body_diff
+        })
+
+        # 1초마다 요약 생성 → 에포크 누적
+        now = time.time()
+        if now - last_short_ts >= CFG["SHORT_WIN_SEC"]:
+            summary = short.summarize()
+            epoch.add_short_summary(summary)
+            short.reset()
+            last_short_ts = now
+
+            # 30초 에포크가 차면 판정
+            if epoch.is_full():
+                rem_score, n3_score, info = epoch.compute_scores()
+                # 간단한 점수 비교로 라벨링
+                if rem_score >= CFG["REM_THRESHOLD"] and rem_score > n3_score:
+                    label = "REM_LIKE"
+                elif n3_score >= CFG["N3_THRESHOLD"] and n3_score > rem_score:
+                    label = "N3_LIKE"
+                else:
+                    label = "UNK"
+
+                # Deep start 로직 (N3 2분 지속)
+                if label == "N3_LIKE":
+                    if not in_deep:
+                        # 진입 시점 저장
+                        if deep_start_ts is None:
+                            deep_start_ts = now
+                        elif now - deep_start_ts >= CFG["DEEP_MIN_SECONDS"]:
+                            in_deep = True
+                    else:
+                        # 이미 deep 상태 유지
+                        pass
+                else:
+                    # N3가 깨지면 deep 판정 리셋(원하면 유지 로직으로 바꿔도 됨)
+                    deep_start_ts = None
+                    in_deep = False
+
+                last_epoch_label = label
+
+                # 화면 로그 출력(개요)
+                print(f"[30s] REM={rem_score:.1f}  N3={n3_score:.1f}  → {label}")
+                print(f"   details: {info}")
+
+                # 새 에포크 시작을 위해 카운터 일부 리셋 (short summaries는 슬라이딩)
+                epoch.saccade_bursts = 0
+                epoch.burst_count = 0
+                epoch.still_frames = 0
+                epoch.total_frames = 0
+
+        # =======================
+        # 화면 오버레이(디버깅용)
+        # =======================
+        # 얼굴/상체 박스
+        cv.rectangle(frame, (face_box[0], face_box[1]), (face_box[2], face_box[3]), (0,255,0), 2)
+        cv.rectangle(frame, (body_box[0], body_box[1]), (body_box[2], body_box[3]), (255,0,0), 2)
+
+        # 텍스트
+        y0 = 24
+        def put(txt):
+            nonlocal y0
+            cv.putText(frame, txt, (10, y0), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv.LINE_AA)
+            y0 += 22
+
+        put(f"Label: {last_epoch_label}   Deep: {in_deep}")
+        put(f"EyeOpen: {eye_open_val:.3f}   MouthOpen: {mouth_open_val:.3f}")
+        put(f"Roll/Yaw/Pitch: {roll:.1f}/{yaw:.3f}/{pitch:.3f}")
+        put(f"FaceDiff: {face_diff:.1f}  BodyDiff: {body_diff:.1f}")
+
+        # 미디어파이프 랜드마크 그리기(원하면 주석 해제)
+        if out.multi_face_landmarks:
+            mp_drawing.draw_landmarks(
+                image=frame,
+                landmark_list=out.multi_face_landmarks[0],
+                connections=mp_face_mesh.FACEMESH_TESSELATION,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=mp_styles.get_default_face_mesh_tesselation_style()
+            )
+            mp_drawing.draw_landmarks(
+                image=frame,
+                landmark_list=out.multi_face_landmarks[0],
+                connections=mp_face_mesh.FACEMESH_CONTOURS,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=mp_styles.get_default_face_mesh_contours_style()
+            )
+            # 홍채는 refine_landmarks=True일 때 표시됨
+
+        cv.imshow("SomnoTrack REM/N3 Analyzer", frame)
+        key = cv.waitKey(1)
+        if key == 27:  # ESC
+            break
+
+    cap.release()
+    cv.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
