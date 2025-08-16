@@ -1,0 +1,55 @@
+{
+    "FPS_TARGET": 30,
+    "SHORT_WIN_SEC": 1,
+    "EPOCH_SEC": 30,
+
+    "EYE_OPEN_THR": 0.24,
+    "EYE_STABLE_FRAC_THR": 0.6,
+
+    "SACCADE_SPEED_THR": 0.015,
+    "SACCADE_BURST_COUNT_THR": 20,
+    "GAZE_JITTER_STD_THR": 0.003,
+    "GAZE_JITTER_EPOCH_RATIO_THR": 0.5,
+
+    "EYE_BAND_ACTIVITY_THR": 0.010,
+    "EYE_BAND_EPOCH_RATIO_THR": 0.4,
+
+    "FRAME_DIFF_THR_FACE": 12,
+    "FRAME_DIFF_THR_BODY": 8,
+    "STILL_FRAC_THR": 0.7,
+    "BURST_COUNT_THR": 25,
+
+    "FACE_BODY_RATIO_THR": 1.6,
+
+    "HEAD_STD_THR": 1.2,
+    "HEAD_VS_EYE_REM_RULE": true,
+
+    "BREATH_RHYTHM_STD_THR": 8.0,
+
+    "MOUTH_OPEN_THR": 0.055,
+    "MOUTH_OPEN_EPOCH_RATIO_THR": 0.6,
+
+    "WEIGHTS": {
+        "REM": {
+            "eye_closed_and_micro": 2.0,
+            "saccade_bursts": 2.5,
+            "gaze_jitter": 1.5,
+            "eyelid_band": 1.0,
+            "still_but_micro": 1.5,
+            "face_body_ratio": 1.0,
+            "head_still_eye_active": 1.0
+        },
+        "N3": {
+            "eye_closed_stable": 2.0,
+            "still_high": 2.0,
+            "no_micro_move": 1.5,
+            "breath_regular": 1.0,
+            "mouth_open": 1.0,
+            "head_very_still": 1.0
+        }
+    },
+    "REM_THRESHOLD": 5.0,
+    "N3_THRESHOLD": 5.0,
+    "DEEP_MIN_SECONDS": 15,
+    "N3_MISS_TOLERANCE": 2
+}
